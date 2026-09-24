@@ -11,6 +11,7 @@ nothing internal exposed, Admin API never public. Kong's own parser
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -268,3 +269,27 @@ def test_profile_list_shows_guards():
     assert r.returncode == 0, r.stderr
     assert "mode-1-all-monolith" in r.stdout
     assert "needs: incompatible, write-cutover" in r.stdout or "needs: write-cutover, incompatible" in r.stdout
+
+
+def test_validate_config_rejects_a_default_that_is_not_all_monolith(tmp_path):
+    # Work on a copy of the repo: the module resolves every path from its own
+    # location, so the real profiles are never touched.
+    import shutil
+
+    for d in ("scripts", "routing", "kong", "kong-image"):
+        shutil.copytree(REPO_ROOT / d, tmp_path / d)
+    shutil.copy(REPO_ROOT / "docker-compose.yml", tmp_path / "docker-compose.yml")
+    mode1 = tmp_path / "routing" / "profiles" / "mode-1-all-monolith.json"
+    mode1.write_text(mode1.read_text(encoding="utf-8").replace('"users-read": "monolith"', '"users-read": "user-service"'))
+
+    import subprocess
+
+    from tests.helpers import powershell_exe
+
+    cmd = [powershell_exe(), "-NoProfile", "-NonInteractive"]
+    if os.name == "nt":
+        cmd += ["-ExecutionPolicy", "Bypass"]
+    cmd += ["-File", str(tmp_path / "scripts" / "validate-config.ps1"), "-SkipDocker"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "routes users-read to user-service; the default MUST be the monolith" in r.stdout

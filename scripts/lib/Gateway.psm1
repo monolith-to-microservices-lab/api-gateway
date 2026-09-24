@@ -65,7 +65,7 @@ function Get-GatewaySettings {
     }
 }
 
-function Get-RouteNames { , $script:RouteNames }
+function Get-RouteNames { $script:RouteNames }   # enumerated: foreach gets one route per iteration
 
 function Read-Utf8File([string]$Path) {
     [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
