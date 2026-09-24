@@ -1,0 +1,141 @@
+# CI - every PR to main and every push to main. No deploy, no cloud.
+#
+#   Lint              ruff (tests + exporter), ShellCheck (kong/entrypoint.sh),
+#                     PSScriptAnalyzer (scripts/, PSScriptAnalyzerSettings.psd1),
+#                     Hadolint (both Dockerfiles)
+#   Validate Config   scripts/validate-config.ps1 - every routing profile
+#                     rendered and parsed by Kong's own `kong config parse`
+#                     (same base image), committed default == mode-1, compose
+#                     config; + pytest tests/config (policy invariants, guards)
+#   Build             patched Kong image + route-state exporter, non-root
+#                     checks, Trivy image scan (HIGH/CRITICAL with a fix)
+#   Integration       real Kong + real config + real PowerShell scripts vs
+#                     controlled stub upstreams (scripts/test-integration.ps1):
+#                     routing, switch/rollback, guards, restart persistence,
+#                     X-Request-ID, traceparent, CORS, headers, size limit,
+#                     rate limit, upstream failure + recovery, metrics, logs
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: ruff
+        run: |
+          pip install ruff==0.16.8
+          ruff check --output-format=github .
+          ruff format --check .
+      - name: shellcheck
+        run: |
+          git ls-files -z '*.sh' | xargs -0 docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 \
+            -x --severity=style
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
+          $findings = Invoke-ScriptAnalyzer -Path ./scripts -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+          $findings | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize -Wrap | Out-String -Width 200
+          if (@($findings).Count -gt 0) { throw "$(@($findings).Count) PSScriptAnalyzer finding(s)" }
+      - name: hadolint
+        run: |
+          for f in kong-image/Dockerfile exporter/Dockerfile; do
+            echo "== $f"
+            docker run --rm -i hadolint/hadolint:v2.15.1 hadolint --failure-threshold warning - < "$f"
+          done
+
+  validate-config:
+    name: Validate Config
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: validate-config.ps1 (kong config parse for every profile, default drift, compose)
+        shell: pwsh
+        run: ./scripts/validate-config.ps1
+      - name: pytest tests/config
+        run: |
+          pip install -e .
+          pytest tests/config -o addopts="" -v --junitxml=junit-config.xml
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: config-tests
+          path: junit-config.xml
+          retention-days: 7
+          if-no-files-found: ignore
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: docker compose build (patched Kong + route-state exporter)
+        run: docker compose build
+      - name: Images run as non-root
+        run: |
+          test "$(docker image inspect -f '{{.Config.User}}' api-gateway-kong:3.9.1)" = "1001"
+          test "$(docker image inspect -f '{{.Config.User}}' api-gateway-route-exporter)" = "1000"
+      - name: Container scan (Trivy, HIGH/CRITICAL with a fix available)
+        run: |
+          for img in api-gateway-kong:3.9.1 api-gateway-route-exporter python:3.12.14-alpine; do
+            echo "== $img"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.74.0 \
+              image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 "$img"
+          done
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [validate-config]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .
+      - name: Kong + stub upstreams (isolated network) + pytest tests/integration
+        shell: pwsh
+        run: ./scripts/test-integration.ps1 -Python python -PytestArgs '-s'
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: integration-report
+          path: |
+            junit-integration.xml
+            integration-containers.log
+            .it-state/
+          retention-days: 7
+          if-no-files-found: ignore

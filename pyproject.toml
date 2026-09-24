@@ -1,0 +1,33 @@
+# Test tooling only - the gateway itself is Kong (config) + PowerShell
+# (operations) + a stdlib-only exporter. Nothing here is deployed.
+[project]
+name = "api-gateway-tests"
+version = "0.1.0"
+description = "Config and integration tests for the Kong API Gateway of the Strangler Fig lab."
+requires-python = ">=3.12"
+dependencies = [
+    "pytest==9.0.3",
+    "httpx==0.28.1",
+    "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+dev = ["ruff==0.16.8"]
+
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests/config"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, bugbear, pyupgrade, bandit
+select = ["E", "W", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S603", "S607", "S310"]

@@ -1,0 +1,45 @@
+# Integration-test overlay: CONTROLLED stub upstreams with the real backends'
+# DNS names, on an ISOLATED network (GATEWAY_NETWORK), so the real Kong
+# config is exercised without the lab - and never next to it on
+# migration-network (duplicate aliases would load-balance between them).
+#
+# Used only by scripts/test-integration.ps1:
+#   docker compose -p api-gateway-it -f docker-compose.yml -f tests/integration/docker-compose.it.yml up -d
+x-stub: &stub
+  image: python:3.12.14-alpine
+  command: ["python", "/stub/stub.py"]
+  volumes:
+    - ./tests/integration/stub-upstream:/stub:ro
+  user: "1000"
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+    interval: 3s
+    timeout: 3s
+    retries: 10
+
+services:
+  stub-monolith:
+    <<: *stub
+    environment: { STUB_NAME: monolith }
+    networks:
+      upstreams:
+        aliases: [monolith-backend]
+
+  stub-user-service:
+    <<: *stub
+    environment: { STUB_NAME: user-service }
+    networks:
+      upstreams:
+        aliases: [user-service]
+
+  stub-sales-service:
+    <<: *stub
+    environment: { STUB_NAME: sales-service }
+    networks:
+      upstreams:
+        aliases: [sales-service]
