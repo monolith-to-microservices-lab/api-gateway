@@ -19,6 +19,9 @@ packages = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests/config"]
+# repo root on sys.path: `from tests.helpers import ...` works with plain
+# `pytest` (CI), not only with `python -m pytest`
+pythonpath = ["."]
 addopts = "-q"
 
 [tool.ruff]
