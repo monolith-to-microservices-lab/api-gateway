@@ -1,0 +1,10 @@
+{
+  "name": "mode-3-sales-service",
+  "description": "Sales fully on sales-service. WRITE CUTOVER + KNOWN INCOMPATIBLE (no user_name, no user existence check).",
+  "routes": {
+    "users-read": "monolith",
+    "users-write": "monolith",
+    "sales-read": "sales-service",
+    "sales-write": "sales-service"
+  }
+}

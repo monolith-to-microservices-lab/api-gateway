@@ -1,0 +1,53 @@
+{
+  "_comment": "Machine-readable version of docs/api-compatibility-matrix.md. The switch scripts derive their guards from THIS file: routing a route to a target flagged 'write-cutover' needs -AcceptWriteDivergence, one flagged 'incompatible' needs -AcceptIncompatibility. 'monolith' is the source of truth and is always allowed.",
+  "routes": {
+    "users-read": {
+      "domain": "users",
+      "scope": "read",
+      "methods": ["GET", "HEAD", "OPTIONS"],
+      "targets": {
+        "monolith": { "flags": [], "notes": "Source of truth." },
+        "user-service": {
+          "flags": [],
+          "notes": "Compatible on the success path: same paths, same UserRead body {id,name,created_at}, same 200/404/422 codes, verified byte-identical for the same row. Error BODY shape differs (monolith {detail}, user-service {error:{code,message,request_id}}); data is the CDC replica (eventually consistent, typically < 1 s)."
+        }
+      }
+    },
+    "users-write": {
+      "domain": "users",
+      "scope": "write",
+      "methods": ["POST", "PUT", "PATCH", "DELETE"],
+      "targets": {
+        "monolith": { "flags": [], "notes": "Source of truth." },
+        "user-service": {
+          "flags": ["write-cutover", "incompatible"],
+          "notes": "Writes land ONLY in the user-service DB; there is no user-service -> monolith sync, so the monolith (still source of truth, and the owner of sales.user_id FK) diverges. Also: user-service accepts a blank name ('   ') that the monolith rejects with 422; PUT/DELETE exist only on user-service."
+        }
+      }
+    },
+    "sales-read": {
+      "domain": "sales",
+      "scope": "read",
+      "methods": ["GET", "HEAD", "OPTIONS"],
+      "targets": {
+        "monolith": { "flags": [], "notes": "Source of truth." },
+        "sales-service": {
+          "flags": ["incompatible"],
+          "notes": "BREAKING for the frontend: SaleRead has no user_name (monolith JOINs users; the frontend renders sale.user_name). GET /sales is paginated (limit default 100, max 1000) while the monolith returns every row. 404/422 bodies differ."
+        }
+      }
+    },
+    "sales-write": {
+      "domain": "sales",
+      "scope": "write",
+      "methods": ["POST", "PUT", "PATCH", "DELETE"],
+      "targets": {
+        "monolith": { "flags": [], "notes": "Source of truth." },
+        "sales-service": {
+          "flags": ["write-cutover", "incompatible"],
+          "notes": "Writes land ONLY in the sales-service DB (no sync back). POST /sales does not check that user_id exists (monolith: 404) and the 201 body has no user_name."
+        }
+      }
+    }
+  }
+}

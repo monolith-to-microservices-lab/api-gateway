@@ -1,0 +1,10 @@
+{
+  "name": "mode-4r-all-reads-services",
+  "description": "All READS on the microservices, all WRITES on the monolith. Sales reads are KNOWN INCOMPATIBLE.",
+  "routes": {
+    "users-read": "user-service",
+    "users-write": "monolith",
+    "sales-read": "sales-service",
+    "sales-write": "monolith"
+  }
+}

@@ -1,0 +1,4 @@
+# LF everywhere: kong/entrypoint.sh runs inside a Linux container (CRLF would
+# break it) and the rendered Kong config is compared byte-for-byte in CI.
+* text=auto eol=lf
+*.png binary

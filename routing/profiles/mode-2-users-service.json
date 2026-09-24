@@ -1,0 +1,10 @@
+{
+  "name": "mode-2-users-service",
+  "description": "Users fully on user-service, reads AND writes. WRITE CUTOVER: writes are NOT synced back to the monolith.",
+  "routes": {
+    "users-read": "user-service",
+    "users-write": "user-service",
+    "sales-read": "monolith",
+    "sales-write": "monolith"
+  }
+}

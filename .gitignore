@@ -1,0 +1,32 @@
+# Applied routing is local operational state, not source.
+# The versioned routing states live in routing/profiles/.
+state/*
+!state/.gitkeep
+
+# Secrets never belong here (the gateway has none today).
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Python (tests, exporter)
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# Test output
+test-results/
+junit*.xml
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+.it-state/

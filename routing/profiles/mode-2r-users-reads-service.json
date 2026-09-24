@@ -1,0 +1,10 @@
+{
+  "name": "mode-2r-users-reads-service",
+  "description": "Strangler step: user READS served by user-service (CDC replica), user WRITES stay on the monolith.",
+  "routes": {
+    "users-read": "user-service",
+    "users-write": "monolith",
+    "sales-read": "monolith",
+    "sales-write": "monolith"
+  }
+}

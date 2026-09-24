@@ -1,0 +1,112 @@
+# ---------------------------------------------------------------------------
+# api-gateway
+#
+# Kong Gateway OSS in DB-less mode: the single entry point of the lab.
+# Decides, per PATH + METHOD, whether /users and /sales go to the monolith or
+# to the extracted microservice. Owns NO data and starts NO copy of the
+# backends - it reaches monolith-backend, user-service and sales-service over
+# the shared, externally managed Docker network (migration-network).
+#
+# Start order (no cross-project depends_on on purpose):
+#   1. the backends (monolito-microservice, user-service, sales-service)
+#   2. this gateway:   docker compose up -d
+#   3. .\scripts\health-check.ps1
+# Kong boots fine even if a backend is not up yet; active health checks mark
+# it unhealthy and requests to it get a controlled 503 until it appears.
+#
+# Ports (host):
+#   8088             proxy - the ONLY port clients use
+#   127.0.0.1:8089   Admin API - localhost only, never on the LAN
+#   127.0.0.1:8090   Status API: /status, /status/ready, /metrics
+#   127.0.0.1:9542   route-state exporter /metrics
+# Inside migration-network Prometheus uses api-gateway:8100/metrics.
+# ---------------------------------------------------------------------------
+name: api-gateway
+
+services:
+  api-gateway:
+    # kong:3.9.1 (pinned) + OS security updates - see kong-image/Dockerfile.
+    build: ./kong-image
+    image: api-gateway-kong:3.9.1
+    entrypoint: ["/bin/sh", "/gateway/kong/entrypoint.sh"]
+    environment:
+      KONG_DATABASE: "off"
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_STATUS_LISTEN: "0.0.0.0:8100"
+      KONG_ADMIN_GUI_LISTEN: "off"
+      # One structured JSON access line per request comes from the file-log
+      # plugin; nginx's own proxy access log would only duplicate it.
+      KONG_PROXY_ACCESS_LOG: "off"
+      KONG_STATUS_ACCESS_LOG: "off"
+      # Admin access log stays on: it is the audit trail of config changes.
+      KONG_ADMIN_ACCESS_LOG: "/dev/stdout"
+      KONG_PROXY_ERROR_LOG: "/dev/stderr"
+      KONG_ADMIN_ERROR_LOG: "/dev/stderr"
+      # No Server/Via version banner, no X-Kong-Request-Id: X-Request-ID is
+      # the one correlation id end to end. Latency headers stay (diagnostics).
+      KONG_HEADERS: "latency_tokens"
+      KONG_HEADERS_UPSTREAM: "off"
+      # A switch must take effect on the very next request in every worker.
+      KONG_WORKER_CONSISTENCY: "strict"
+      KONG_NGINX_WORKER_PROCESSES: "2"
+      # Docker's DNS answers with long TTLs, and a STOPPED container simply
+      # vanishes from it (NXDOMAIN). Short TTLs so a backend that comes back
+      # (possibly with a new IP) is used again within seconds, not ~1 min
+      # (measured with the defaults).
+      KONG_DNS_VALID_TTL: "10"
+      KONG_DNS_NOT_FOUND_TTL: "5"
+      # Tracing for the opentelemetry plugin. 100% sampling: lab volumes.
+      KONG_TRACING_INSTRUMENTATIONS: "request,balancer"
+      KONG_TRACING_SAMPLING_RATE: "1.0"
+      KONG_ANONYMOUS_REPORTS: "off"
+    ports:
+      - "${GATEWAY_PROXY_PORT:-8088}:8000"
+      - "127.0.0.1:${GATEWAY_ADMIN_PORT:-8089}:8001"
+      - "127.0.0.1:${GATEWAY_STATUS_PORT:-8090}:8100"
+    volumes:
+      - ./kong:/gateway/kong:ro
+      - ${GATEWAY_STATE_DIR:-./state}:/gateway/state:ro
+    networks:
+      upstreams:
+        aliases:
+          - kong
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  # Publishes the CONFIGURED route -> upstream mapping as Prometheus metrics
+  # (gateway_route_upstream_info) so Grafana can show "/users -> ?" even
+  # when no traffic flows. Reads the Admin API over the Docker network.
+  route-exporter:
+    build: ./exporter
+    environment:
+      KONG_ADMIN_URL: "http://api-gateway:8001"
+      EXPORTER_PORT: "9542"
+    ports:
+      - "127.0.0.1:${GATEWAY_EXPORTER_PORT:-9542}:9542"
+    networks:
+      upstreams:
+        aliases:
+          - gateway-route-exporter
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    restart: unless-stopped
+
+networks:
+  # The shared lab network (docker network create migration-network).
+  # Integration tests point this at an isolated network with stub backends.
+  upstreams:
+    name: ${GATEWAY_NETWORK:-migration-network}
+    external: true

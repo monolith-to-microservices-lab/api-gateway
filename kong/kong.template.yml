@@ -1,0 +1,282 @@
+# ---------------------------------------------------------------------------
+# Kong declarative configuration TEMPLATE (DB-less).
+#
+# This is the ONLY hand-edited Kong config in this repo. The four
+# placeholders in "routes:" (double-underscore tokens) are the whole routing
+# decision of the Strangler Fig:
+#
+#   USERS_READ_SERVICE    GET /users, GET /users/{id}
+#   USERS_WRITE_SERVICE   POST/PUT/PATCH/DELETE /users...
+#   SALES_READ_SERVICE    GET /sales, GET /sales/{id}
+#   SALES_WRITE_SERVICE   POST/PUT/PATCH/DELETE /sales...
+#
+# They are filled from routing/profiles/*.json by scripts/lib/Gateway.psm1
+# (never by hand). kong/kong.default.yml is this template rendered with
+# routing/profiles/mode-1-all-monolith.json and is what Kong boots with
+# when no route switch has been applied yet (see kong/entrypoint.sh).
+#
+# Keep this file ASCII-only: Windows PowerShell 5.1 renders it.
+# ---------------------------------------------------------------------------
+_format_version: "3.0"
+_transform: true
+
+# --- Upstreams: one per backend, with ACTIVE health checks -----------------
+# "Kong is up" and "the backend is healthy" are different facts. Active
+# checks hit each backend's own /health, so kong_upstream_target_health
+# (Prometheus) and GET /upstreams/<name>/health (Admin API) report the
+# backend state independently of the gateway's own liveness.
+upstreams:
+  - name: monolith.upstream
+    healthchecks: &healthchecks
+      active:
+        type: http
+        http_path: /health
+        timeout: 2
+        concurrency: 1
+        healthy:
+          interval: 10
+          successes: 1
+          http_statuses: [200]
+        unhealthy:
+          interval: 5
+          http_failures: 2
+          tcp_failures: 2
+          timeouts: 2
+          http_statuses: [429, 500, 502, 503, 504]
+    targets:
+      - target: monolith-backend:8000
+
+  - name: user-service.upstream
+    healthchecks: *healthchecks
+    targets:
+      - target: user-service:8000
+
+  - name: sales-service.upstream
+    healthchecks: *healthchecks
+    targets:
+      - target: sales-service:8000
+
+# --- Services ----------------------------------------------------------------
+# retries: 0 on purpose. Kong retries on connection errors by default, which
+# for a POST could mean a duplicated write. Routing here is deterministic:
+# one request, one attempt, one upstream - failures surface as 502/503.
+services:
+  - name: monolith
+    host: monolith.upstream
+    port: 8000
+    protocol: http
+    retries: 0
+    connect_timeout: 2000
+    read_timeout: 30000
+    write_timeout: 30000
+
+  - name: user-service
+    host: user-service.upstream
+    port: 8000
+    protocol: http
+    retries: 0
+    connect_timeout: 2000
+    read_timeout: 30000
+    write_timeout: 30000
+
+  - name: sales-service
+    host: sales-service.upstream
+    port: 8000
+    protocol: http
+    retries: 0
+    connect_timeout: 2000
+    read_timeout: 30000
+    write_timeout: 30000
+
+# --- Routes: PATH + METHOD ---------------------------------------------------
+# Each domain has a READ route and a WRITE route so reads can be strangled
+# before writes. OPTIONS sits on the read route only so CORS preflights for
+# every method are matched (the global cors plugin answers them; they never
+# reach a backend). /internal/* (migration-only import endpoints), /docs,
+# /openapi.json, /metrics and the backends' /health are NOT routed.
+routes:
+  - name: users-read
+    service: __USERS_READ_SERVICE__
+    methods: [GET, HEAD, OPTIONS]
+    paths: ["~/users(/.*)?$"]
+    protocols: [http]
+    strip_path: false
+    preserve_host: true
+
+  - name: users-write
+    service: __USERS_WRITE_SERVICE__
+    methods: [POST, PUT, PATCH, DELETE]
+    paths: ["~/users(/.*)?$"]
+    protocols: [http]
+    strip_path: false
+    preserve_host: true
+
+  - name: sales-read
+    service: __SALES_READ_SERVICE__
+    methods: [GET, HEAD, OPTIONS]
+    paths: ["~/sales(/.*)?$"]
+    protocols: [http]
+    strip_path: false
+    preserve_host: true
+
+  - name: sales-write
+    service: __SALES_WRITE_SERVICE__
+    methods: [POST, PUT, PATCH, DELETE]
+    paths: ["~/sales(/.*)?$"]
+    protocols: [http]
+    strip_path: false
+    preserve_host: true
+
+  # Gateway liveness on the public port. Answered by Kong itself - it says
+  # NOTHING about the backends (use scripts/health-check.ps1 for that).
+  - name: gateway-health
+    methods: [GET]
+    paths: ["/gateway/health"]
+    protocols: [http]
+    plugins:
+      - name: request-termination
+        config:
+          status_code: 200
+          content_type: application/json
+          body: '{"status":"ok","component":"api-gateway"}'
+
+# --- Global plugins ----------------------------------------------------------
+plugins:
+  # X-Request-ID hygiene. A client may send its own id (kept, end to end),
+  # but an oversized / weird-charset value is dropped so correlation-id
+  # generates a fresh one - log-injection and header-abuse guard.
+  - name: pre-function
+    config:
+      rewrite:
+        - |
+          local rid = kong.request.get_header("X-Request-ID")
+          if rid and (#rid > 128 or not rid:match("^[%w%-%._:]+$")) then
+            kong.service.request.clear_header("X-Request-ID")
+            kong.log.warn("discarded malformed client X-Request-ID")
+          end
+
+  # Keeps an incoming X-Request-ID, generates a UUID when absent, sends it
+  # to the backend and echoes it to the client. The backends already
+  # honour an incoming X-Request-ID, so ONE id spans client, gateway and
+  # backend logs. (Kong's own X-Kong-Request-Id is disabled in compose.)
+  - name: correlation-id
+    config:
+      header_name: X-Request-ID
+      generator: uuid
+      echo_downstream: true
+
+  # Lab sizing: generous enough for E2E + frontend, low enough to prove it
+  # works. In local Docker every host client (browser, tests, curl) shares
+  # one source IP, so this is effectively a per-host limit.
+  - name: rate-limiting
+    config:
+      second: 100
+      minute: 3000
+      policy: local
+      limit_by: ip
+      fault_tolerant: true
+      hide_client_headers: false
+      error_code: 429
+      error_message: "API rate limit exceeded"
+
+  # Payloads in this API are a few hundred bytes. 1 MB is two orders of
+  # magnitude of headroom and still stops oversized bodies at the edge.
+  - name: request-size-limiting
+    config:
+      allowed_payload_size: 1
+      size_unit: megabytes
+      require_content_length: false
+
+  # CORS is centralised HERE. user-service and sales-service have no CORS at
+  # all, so without this the browser could not reach them once a route is
+  # switched. The monolith's own CORSMiddleware only matters for direct
+  # (non-gateway) access on :8000.
+  - name: cors
+    config:
+      origins:
+        - http://localhost:5173
+        - http://127.0.0.1:5173
+      methods: [GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]
+      headers: [Accept, Content-Type, X-Request-ID, traceparent, tracestate]
+      exposed_headers: [X-Request-ID, X-Upstream-Service, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset]
+      credentials: false
+      max_age: 600
+      preflight_continue: false
+
+  # Security headers for a JSON API. No CSP/HSTS here: no HTML is served
+  # through the gateway (Swagger /docs is not routed) and there is no TLS
+  # yet - HSTS arrives with the TLS phase. The monolith's
+  # Access-Control-Allow-Credentials is stripped so the gateway's CORS
+  # policy (credentials: false) is the only one the browser sees.
+  - name: response-transformer
+    config:
+      remove:
+        headers: [Server, Access-Control-Allow-Credentials]
+      add:
+        headers:
+          - "X-Content-Type-Options:nosniff"
+          - "X-Frame-Options:DENY"
+          - "Referrer-Policy:no-referrer"
+          - "Cache-Control:no-store"
+
+  # Didactic, lab-only: tells the client which backend served the request
+  # (the observable proof of a route switch). Only set when the response
+  # really came from a backend - not on CORS preflights, 429s or 5xx that
+  # Kong generated itself (the access log still names the upstream there).
+  # Remove for production - it discloses internal topology.
+  - name: post-function
+    config:
+      header_filter:
+        - |
+          local svc = kong.router.get_service()
+          if svc and svc.name and kong.response.get_source() == "service" then
+            kong.response.set_header("X-Upstream-Service", svc.name)
+          end
+
+  # Metrics on the Status API (:8100/metrics, internal). Labels are
+  # service / route / code - all bounded sets; no per-path or per-consumer
+  # series.
+  - name: prometheus
+    config:
+      status_code_metrics: true
+      latency_metrics: true
+      upstream_health_metrics: true
+      bandwidth_metrics: false
+      per_consumer: false
+
+  # One JSON line per proxied request on stdout -> Promtail -> Loki.
+  # Request/response headers are dropped (they would carry Authorization
+  # and cookies once auth exists); route/service objects are flattened to
+  # their names; Kong's internal request.id and the duplicate correlation_id
+  # are dropped so request_id (= X-Request-ID) is the only id. request_id
+  # and trace_id are JSON fields, never Loki labels.
+  - name: file-log
+    config:
+      path: /dev/stdout
+      reopen: false
+      custom_fields_by_lua:
+        log_type: return "access"
+        request_id: return kong.request.get_header("X-Request-ID")
+        route: local r = kong.router.get_route() return r and r.name or nil
+        upstream: local s = kong.router.get_service() return s and s.name or nil
+        method: return kong.request.get_method()
+        path: return kong.request.get_path()
+        status: return kong.response.get_status()
+        trace_id: local tp = kong.request.get_header("traceparent") return tp and tp:match("^%x%x%-(%x+)%-") or nil
+        request.headers: return nil
+        request.id: return nil
+        response.headers: return nil
+        service: return nil
+        correlation_id: return nil
+
+  # Real W3C trace context propagation: continues an incoming traceparent,
+  # otherwise starts a trace; the backend receives Kong's span as parent.
+  - name: opentelemetry
+    config:
+      traces_endpoint: http://otel-collector:4318/v1/traces
+      resource_attributes:
+        service.name: api-gateway
+      propagation:
+        extract: [w3c]
+        inject: [w3c]
+        default_format: w3c

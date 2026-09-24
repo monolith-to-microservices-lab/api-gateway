@@ -1,0 +1,10 @@
+{
+  "name": "mode-1-all-monolith",
+  "description": "DEFAULT. Every route to the monolith (source of truth). The state Kong boots with.",
+  "routes": {
+    "users-read": "monolith",
+    "users-write": "monolith",
+    "sales-read": "monolith",
+    "sales-write": "monolith"
+  }
+}

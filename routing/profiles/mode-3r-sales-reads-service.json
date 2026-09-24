@@ -1,0 +1,10 @@
+{
+  "name": "mode-3r-sales-reads-service",
+  "description": "Strangler step: sale READS served by sales-service. KNOWN INCOMPATIBLE: no user_name field, default page size 100.",
+  "routes": {
+    "users-read": "monolith",
+    "users-write": "monolith",
+    "sales-read": "sales-service",
+    "sales-write": "monolith"
+  }
+}

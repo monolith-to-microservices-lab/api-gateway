@@ -1,0 +1,10 @@
+{
+  "name": "mode-4-all-services",
+  "description": "Everything on the microservices. WRITE CUTOVER on both domains + sales KNOWN INCOMPATIBLE.",
+  "routes": {
+    "users-read": "user-service",
+    "users-write": "user-service",
+    "sales-read": "sales-service",
+    "sales-write": "sales-service"
+  }
+}
